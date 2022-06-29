@@ -11,7 +11,7 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 #from keras.models import Sequential
 from tensorflow.keras import layers
-#from keras.layers.core import Lambda    
+#from keras.layers.core import Lambda
 from tensorflow.keras import backend as K
 from tensorflow.keras.models import Model
 import tensorflow
@@ -67,7 +67,7 @@ parser.add_argument("--prediction_freq",default=5,type=int,
 parser.add_argument("--max_SNPs",default=None,type=int,
                     help="If not None, randomly select --max_SNPs variants \
                           to run. default: None")
-parser.add_argument("--latent_dim",default=2,type=int,
+parser.add_argument("--latent_dim",default=10,type=int,
                     help="N latent dimensions to fit. default: 2")
 parser.add_argument("--prune_LD",default=False,action="store_true",
                     help="Prune sites for linkage disequilibrium before fitting the model? \
@@ -359,6 +359,8 @@ if search_network_sizes:
     print('best parameters:\nwidth = '+str(width)+'\ndepth = '+str(depth))
 
 
+
+
 #load model
 def sampling(args):
     z_mean, z_log_var = args
@@ -368,9 +370,9 @@ def sampling(args):
 
 #encoder
 input_seq = keras.Input(shape=(traingen.shape[1],))
-x=layers.Dense(width,activation="elu")(input_seq)
-for i in range(depth-1):
-    x=layers.Dense(width,activation="elu")(x)
+x=layers.Dense(500,activation="relu")(input_seq)
+x=layers.Dense(500,activation="relu")(x)
+x=layers.Dense(2000,activation="relu")(x)
 z_mean=layers.Dense(latent_dim)(x)
 z_log_var=layers.Dense(latent_dim)(x)
 z = layers.Lambda(sampling,output_shape=(latent_dim,), name='z')([z_mean, z_log_var])
@@ -378,9 +380,9 @@ encoder=Model(input_seq,[z_mean,z_log_var,z],name='encoder')
 
 #decoder
 decoder_input=layers.Input(shape=(latent_dim,),name='z_sampling')
-x=layers.Dense(width,activation="linear")(decoder_input)#was elu
-for i in range(depth-1):
-    x=layers.Dense(width,activation="elu")(x)
+x=layers.Dense(2000,activation="relu")(decoder_input)#was elu
+x=layers.Dense(500,activation="relu")(x)
+x=layers.Dense(500,activation="relu")(x)
 output=layers.Dense(traingen.shape[1],activation="sigmoid")(x) #hard sigmoid seems natural here but appears to lead to more left-skewed decoder outputs.
 decoder=Model(decoder_input,output,name='decoder')
 
@@ -532,3 +534,13 @@ if plot:
 # prune_iter=1
 # prune_size=500
 # PCA_scaler="Patterson"
+
+
+
+'''
+\euromds_weights.hdf5
+WARNING:tensorflow:Found duplicated `Variable`s in Model's `weights`. 
+This is usually caused by `Variable`s being shared by Layers in the Model. 
+These `Variable`s will be treated as separate `Variable`s when the Model 
+is restored. To avoid this, please save with `save_format="tf"`.
+'''
