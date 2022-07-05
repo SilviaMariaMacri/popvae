@@ -241,60 +241,24 @@ class IDEC(object):
         z_log_var = self.model.get_layer('encoder').output[1]
         
         
-        input_seq = self.autoencoder.input
-        output_seq = self.autoencoder.output
-        def loss_autoencoder(true, pred):
-            # Reconstruction loss
-            reconstruction_loss = keras.losses.mean_squared_error(true,pred)
-            # KL divergence loss
-            kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
-            kl_loss = K.sum(kl_loss, axis=-1)
-            kl_loss *= -0.5
-            vae_loss = K.mean(reconstruction_loss + kl_loss) 
-            return vae_loss  
-        reconstruction_loss = keras.losses.mean_squared_error(input_seq,output_seq)
-        # KL divergence loss
-        kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
-        kl_loss = K.sum(kl_loss, axis=-1)
-        kl_loss *= -0.5
-        vae_loss = K.mean(reconstruction_loss + kl_loss) 
-        self.model.add_loss(vae_loss)
-        '''
-        @tf.function
-        def loss_autoencoder(input_seq,output_seq):
-                
-            reconstruction_loss = keras.losses.mean_squared_error(input_seq,output_seq)
-            reconstruction_loss *= self.input_dim
-            z_mean = self.autoencoder.layers[1].output[0]
-            z_log_var = self.autoencoder.layers[1].output[1]
-            kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
-            kl_loss = K.sum(kl_loss, axis=-1)
-            kl_loss *= -0.5
-            vae_loss = K.mean(reconstruction_loss + kl_loss)
-            return vae_loss 
-
-        @tf.function
-        def loss_autoencoder(input_seq,output_seq):
-            reconstruction_loss = keras.losses.mean_squared_error(input_seq,output_seq)
-            reconstruction_loss *= 54
-            x=layers.Dense(500,activation="relu",name='e_0')(input_seq)
-            x=layers.Dense(500,activation="relu",name='e_1')(x)
-            x=layers.Dense(2000,activation="relu",name='e_2')(x)
-            z_mean=layers.Dense(latent_dim,name='mean')(x)
-            z_log_var=layers.Dense(latent_dim,name='std')(x)
-            #z_mean = autoencoder.layers[1].output[0]
-            #z_log_var = autoencoder.layers[1].output[1]
-            kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
-            kl_loss = K.sum(kl_loss, axis=-1)
-            kl_loss *= -0.5
-            vae_loss = K.mean(reconstruction_loss + kl_loss)
-            return vae_loss
-        '''
-        #import eagerpy as ep
-        #loss_autoencoder = ep.astensor(loss_autoencoder)
-        self.model.compile(#loss={'clustering':'kld','decoder':'kld'},#loss_autoencoder},
-                           #loss_weights=[gamma, 1],
-                           optimizer=optimizer)
+        #input_seq = self.autoencoder.input
+        #output_seq = self.autoencoder.output
+        def loss_modificata(z_mean,z_log_var):
+            def loss_autoencoder(true, pred):
+                # Reconstruction loss
+                reconstruction_loss = keras.losses.mean_squared_error(true,pred)
+                # KL divergence loss
+                #kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
+                #kl_loss = K.sum(kl_loss, axis=-1)
+                #kl_loss *= -0.5
+                #vae_loss = K.mean(reconstruction_loss + kl_loss)
+                return reconstruction_loss#vae_loss 
+            return loss_autoencoder
+        
+        self.model.compile(loss={'clustering':'kld','decoder':loss_modificata(z_mean, z_log_var)},#vae_loss(z_mean, z_log_var)},#loss_autoencoder},
+                           loss_weights=[gamma, 1],
+                           optimizer=optimizer,
+                           run_eagerly=True)
         
     def load_weights(self, weights_path):  # load weights of IDEC model
         self.model.load_weights(weights_path)
@@ -328,7 +292,6 @@ class IDEC(object):
         y_pred = kmeans.fit_predict(self.encoder.predict(x)[2])
         y_pred_last = y_pred
         self.model.get_layer(name='clustering').set_weights([kmeans.cluster_centers_])
-
         # logging file
         import csv, os
         if not os.path.exists(save_dir):
@@ -340,10 +303,10 @@ class IDEC(object):
         loss = [0, 0, 0]
         index = 0
         for ite in range(int(maxiter)):
+            print('ite: ',ite)
             if ite % update_interval == 0:
                 q, _ = self.model.predict(x, verbose=0)
                 p = self.target_distribution(q)  # update the auxiliary target distribution p
-
                 # evaluate the clustering performance
                 y_pred = q.argmax(1)
                 delta_label = np.sum(y_pred != y_pred_last).astype(np.float32) / y_pred.shape[0]
@@ -363,23 +326,22 @@ class IDEC(object):
                     print('Reached tolerance threshold. Stopping training.')
                     logfile.close()
                     break
-
             # train on batch
             if (index + 1) * self.batch_size > x.shape[0]:
                 loss = self.model.train_on_batch(x=x[index * self.batch_size::],
-                                                 y=[p[index * self.batch_size::], x[index * self.batch_size::]])
+                                                 y=[p[index * self.batch_size::], 
+                                                    x[index * self.batch_size::]])
                 index = 0
             else:
                 loss = self.model.train_on_batch(x=x[index * self.batch_size:(index + 1) * self.batch_size],
                                                  y=[p[index * self.batch_size:(index + 1) * self.batch_size],
                                                     x[index * self.batch_size:(index + 1) * self.batch_size]])
                 index += 1
-
             # save intermediate model
-            if ite % save_interval == 0:
+            #if ite % save_interval == 0:
                 # save IDEC model checkpoints
-                print('saving model to:', save_dir + '/IDEC_model_' + str(ite) + '.h5')
-                self.model.save_weights(save_dir + '/IDEC_model_' + str(ite) + '.h5')
+            print('saving model to:', save_dir + '/IDEC_model_' + str(ite) + '.h5')
+            self.model.save_weights(save_dir + '/IDEC_model_' + str(ite) + '.h5')
 
             ite += 1
 
@@ -389,19 +351,11 @@ class IDEC(object):
         self.model.save_weights(save_dir + '/IDEC_model_final.h5')
         
         return y_pred
+
 #%%
-
-loss = model.train_on_batch(x=x[index * batch_size:(index + 1) * batch_size],
-                                 y=[p[index * batch_size:(index + 1) * batch_size],
-                                    x[index * batch_size:(index + 1) *batch_size]])
-
-
-
-
-
 if __name__ == "__main__":
     # setting the hyper parameters     
-#%%    
+    
     import argparse
 
     parser = argparse.ArgumentParser(description='train',
@@ -412,7 +366,7 @@ if __name__ == "__main__":
     parser.add_argument('--maxiter', default=12e4, type=int)
     parser.add_argument('--gamma', default=0.1, type=float,
                         help='coefficient of clustering loss')
-    parser.add_argument('--update_interval', default=140, type=int)
+    parser.add_argument('--update_interval', default=100, type=int)
     parser.add_argument('--tol', default=0.001, type=float)
     parser.add_argument('--ae_weights', default='euromds_weights.hdf5', help='This argument must be given')
     parser.add_argument('--save_dir', default='results/idec_var')
