@@ -23,6 +23,9 @@ from tensorflow.keras.optimizers import SGD
 import tensorflow.keras.backend as K
 from tensorflow.python.keras.layers import Layer, InputSpec
 from tensorflow.keras.layers import Dense, Input
+import tensorflow.keras as keras
+from tensorflow.keras import layers
+import tensorflow as tf
 
 from sklearn.cluster import KMeans
 from sklearn import metrics
@@ -51,7 +54,7 @@ def cluster_acc(y_true, y_pred):
     return sum([w[i, j] for i, j in ind]) * 1.0 / y_pred.size
 
 
-def autoencoder(dims, act='relu'):
+def autoencoder_vecchio(dims, act='relu'):
     """
     Fully connected auto-encoder model, symmetric.
     Arguments:
@@ -79,8 +82,61 @@ def autoencoder(dims, act='relu'):
 
     # output
     h = Dense(dims[0], name='decoder_0')(h)
+    
+    model = Model(inputs=x, outputs=h)
+    #loss = keras.losses.mean_squared_error(x,h)
+    #model.add_loss(loss)
 
-    return Model(inputs=x, outputs=h)
+    return model
+
+
+
+
+def autoencoder(dims):
+    
+    latent_dim = dims[-1]
+        
+    def sampling(args):
+        z_mean, z_log_var = args
+        epsilon = K.random_normal(shape=(K.shape(z_mean)[0], latent_dim),
+                                      mean=0., stddev=0.5,seed=None)
+        return z_mean + K.exp(z_log_var) * epsilon 
+   
+    #encoder
+    input_seq = keras.Input(shape=(dims[0],))
+    x=layers.Dense(500,activation="relu",name='e_0')(input_seq)
+    x=layers.Dense(500,activation="relu",name='e_1')(x)
+    x=layers.Dense(2000,activation="relu",name='e_2')(x)
+    z_mean=layers.Dense(latent_dim,name='mean')(x)
+    z_log_var=layers.Dense(latent_dim,name='std')(x)
+    z = layers.Lambda(sampling,output_shape=(latent_dim,), name='z')([z_mean, z_log_var])
+    encoder=Model(input_seq,[z_mean,z_log_var,z],name='encoder')
+    
+    #decoder
+    decoder_input=layers.Input(shape=(latent_dim,),name='z_sampling')
+    x=layers.Dense(2000,activation="relu",name='d_2')(decoder_input)#was elu
+    x=layers.Dense(500,activation="relu",name='d_1')(x)
+    x=layers.Dense(500,activation="relu",name='d_0')(x)
+    output=layers.Dense(dims[0],activation="sigmoid")(x) #hard sigmoid seems natural here but appears to lead to more left-skewed decoder outputs.
+    decoder=Model(decoder_input,output,name='decoder')
+    
+    #end-to-end vae
+    output_seq = decoder(encoder(input_seq)[2])
+    vae = Model(input_seq, output_seq, name='vae')
+    
+    reconstruction_loss = keras.losses.mean_squared_error(input_seq,output_seq)
+    reconstruction_loss *= dims[0]
+    kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
+    kl_loss = K.sum(kl_loss, axis=-1)
+    kl_loss *= -0.5
+    #kl_loss *= 5
+    vae_loss = K.mean(reconstruction_loss + kl_loss)
+    vae.add_loss(vae_loss)
+    
+    return vae
+
+    
+    
 
 
 class ClusteringLayer(Layer):
@@ -164,6 +220,8 @@ class IDEC(object):
         self.batch_size = batch_size
         self.autoencoder = autoencoder(self.dims)
 
+   
+    
     def initialize_model(self, ae_weights=None, gamma=0.1, optimizer='adam'):
         if ae_weights is not None:
             self.autoencoder.load_weights(ae_weights)
@@ -173,17 +231,71 @@ class IDEC(object):
             print('    python IDEC.py mnist --ae_weights weights.h5')
             exit()
 
-        hidden = self.autoencoder.get_layer(name='encoder_%d' % (self.n_stacks - 1)).output
-        self.encoder = Model(inputs=self.autoencoder.input, outputs=hidden)
-
+        hidden = self.autoencoder.get_layer(name='encoder').output
         # prepare IDEC model
-        clustering_layer = ClusteringLayer(self.n_clusters, name='clustering')(hidden)
-        self.model = Model(inputs=self.autoencoder.input,
-                           outputs=[clustering_layer, self.autoencoder.output])
-        self.model.compile(loss={'clustering': 'kld', 'decoder_0': 'mse'},
-                           loss_weights=[gamma, 1],
-                           optimizer=optimizer)
+        clustering_layer = ClusteringLayer(self.n_clusters, name='clustering')(hidden[2])
+        self.model = Model(inputs=self.autoencoder.input,outputs=[clustering_layer, self.autoencoder.output])       
+        
+        self.encoder = Model(inputs=self.autoencoder.input, outputs=hidden)
+        z_mean = self.model.get_layer('encoder').output[0]
+        z_log_var = self.model.get_layer('encoder').output[1]
+        
+        
+        input_seq = self.autoencoder.input
+        output_seq = self.autoencoder.output
+        def loss_autoencoder(true, pred):
+            # Reconstruction loss
+            reconstruction_loss = keras.losses.mean_squared_error(true,pred)
+            # KL divergence loss
+            kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
+            kl_loss = K.sum(kl_loss, axis=-1)
+            kl_loss *= -0.5
+            vae_loss = K.mean(reconstruction_loss + kl_loss) 
+            return vae_loss  
+        reconstruction_loss = keras.losses.mean_squared_error(input_seq,output_seq)
+        # KL divergence loss
+        kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
+        kl_loss = K.sum(kl_loss, axis=-1)
+        kl_loss *= -0.5
+        vae_loss = K.mean(reconstruction_loss + kl_loss) 
+        self.model.add_loss(vae_loss)
+        '''
+        @tf.function
+        def loss_autoencoder(input_seq,output_seq):
+                
+            reconstruction_loss = keras.losses.mean_squared_error(input_seq,output_seq)
+            reconstruction_loss *= self.input_dim
+            z_mean = self.autoencoder.layers[1].output[0]
+            z_log_var = self.autoencoder.layers[1].output[1]
+            kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
+            kl_loss = K.sum(kl_loss, axis=-1)
+            kl_loss *= -0.5
+            vae_loss = K.mean(reconstruction_loss + kl_loss)
+            return vae_loss 
 
+        @tf.function
+        def loss_autoencoder(input_seq,output_seq):
+            reconstruction_loss = keras.losses.mean_squared_error(input_seq,output_seq)
+            reconstruction_loss *= 54
+            x=layers.Dense(500,activation="relu",name='e_0')(input_seq)
+            x=layers.Dense(500,activation="relu",name='e_1')(x)
+            x=layers.Dense(2000,activation="relu",name='e_2')(x)
+            z_mean=layers.Dense(latent_dim,name='mean')(x)
+            z_log_var=layers.Dense(latent_dim,name='std')(x)
+            #z_mean = autoencoder.layers[1].output[0]
+            #z_log_var = autoencoder.layers[1].output[1]
+            kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
+            kl_loss = K.sum(kl_loss, axis=-1)
+            kl_loss *= -0.5
+            vae_loss = K.mean(reconstruction_loss + kl_loss)
+            return vae_loss
+        '''
+        #import eagerpy as ep
+        #loss_autoencoder = ep.astensor(loss_autoencoder)
+        self.model.compile(#loss={'clustering':'kld','decoder':'kld'},#loss_autoencoder},
+                           #loss_weights=[gamma, 1],
+                           optimizer=optimizer)
+        
     def load_weights(self, weights_path):  # load weights of IDEC model
         self.model.load_weights(weights_path)
 
@@ -213,7 +325,7 @@ class IDEC(object):
         # initialize cluster centers using k-means
         print('Initializing cluster centers with k-means.')
         kmeans = KMeans(n_clusters=self.n_clusters, n_init=20)
-        y_pred = kmeans.fit_predict(self.encoder.predict(x))
+        y_pred = kmeans.fit_predict(self.encoder.predict(x)[2])
         y_pred_last = y_pred
         self.model.get_layer(name='clustering').set_weights([kmeans.cluster_centers_])
 
@@ -279,6 +391,14 @@ class IDEC(object):
         return y_pred
 #%%
 
+loss = model.train_on_batch(x=x[index * batch_size:(index + 1) * batch_size],
+                                 y=[p[index * batch_size:(index + 1) * batch_size],
+                                    x[index * batch_size:(index + 1) *batch_size]])
+
+
+
+
+
 if __name__ == "__main__":
     # setting the hyper parameters     
 #%%    
@@ -287,29 +407,26 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='train',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--dataset', default='mnist', choices=['mnist', 'usps', 'reutersidf10k'])
-    parser.add_argument('--n_clusters', default=10, type=int)
-    parser.add_argument('--batch_size', default=256, type=int)
-    parser.add_argument('--maxiter', default=2e4, type=int)
+    parser.add_argument('--n_clusters', default=6, type=int)
+    parser.add_argument('--batch_size', default=32, type=int)
+    parser.add_argument('--maxiter', default=12e4, type=int)
     parser.add_argument('--gamma', default=0.1, type=float,
                         help='coefficient of clustering loss')
     parser.add_argument('--update_interval', default=140, type=int)
     parser.add_argument('--tol', default=0.001, type=float)
-    parser.add_argument('--ae_weights', default='euromds_weights.h5', help='This argument must be given')
-    parser.add_argument('--save_dir', default='results/idec')
+    parser.add_argument('--ae_weights', default='euromds_weights.hdf5', help='This argument must be given')
+    parser.add_argument('--save_dir', default='results/idec_var')
     args = parser.parse_args()
     print(args)
 
     # load dataset
     optimizer = SGD(lr=0.1, momentum=0.99)
-    from datasets import load_mnist, load_reuters, load_usps
-
-    if args.dataset == 'mnist':  # recommends: n_clusters=10, update_interval=140
-        x, y = load_mnist()
-        optimizer = 'adam'
-    elif args.dataset == 'usps':  # recommends: n_clusters=10, update_interval=30
-        x, y = load_usps('data/usps')
-    elif args.dataset == 'reutersidf10k':  # recommends: n_clusters=4, update_interval=3
-        x, y = load_reuters('data/reuters')
+    import json
+    x = json.load(open('data/euromds/euromds.json','r'))
+    x = np.array(x)
+    #if exclude_data_duplicates == True:
+        # exclude duplicate rows:
+    x = np.unique(x,axis=0)
 
     # prepare the IDEC model
     idec = IDEC(dims=[x.shape[-1], 500, 500, 2000, 10], n_clusters=args.n_clusters, batch_size=args.batch_size)
@@ -319,7 +436,12 @@ if __name__ == "__main__":
 
     # begin clustering, time not include pretraining part.
     t0 = time()
-    y_pred = idec.clustering(x, y=y, tol=args.tol, maxiter=1,#args.maxiter,
-                             update_interval=args.update_interval, save_dir=args.save_dir)
-    print('acc:', cluster_acc(y, y_pred))
+    y_pred = idec.clustering(x, y=None, tol=args.tol, maxiter=3,#args.maxiter,
+                                 update_interval=args.update_interval, save_dir=args.save_dir)
+   # print('acc:', cluster_acc(y, y_pred))
     print('clustering time: ', (time() - t0))
+    
+    
+    
+    
+   
