@@ -19,15 +19,15 @@ Author:
 from time import time
 import numpy as np
 from tensorflow.keras.models import Model
-from tensorflow.keras.optimizers import SGD
+#from tensorflow.keras.optimizers import SGD
 import tensorflow.keras.backend as K
 from tensorflow.python.keras.layers import Layer, InputSpec
 from tensorflow.keras.layers import Dense, Input
 import tensorflow.keras as keras
 from tensorflow.keras import layers
-import tensorflow as tf
+#import tensorflow as tf
 
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans,SpectralClustering
 from sklearn import metrics
 
 
@@ -239,24 +239,30 @@ class IDEC(object):
         self.encoder = Model(inputs=self.autoencoder.input, outputs=hidden)
         z_mean = self.model.get_layer('encoder').output[0]
         z_log_var = self.model.get_layer('encoder').output[1]
-        
-        
+       
         #input_seq = self.autoencoder.input
-        #output_seq = self.autoencoder.output
+        #output_seq = self.autoencoder.output        
+        #reconstruction_loss = keras.losses.mean_squared_error( input_seq,output_seq)
+        #kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
+        #kl_loss = K.sum(kl_loss, axis=-1)
+        #kl_loss *= -0.5
+        #vae_loss = K.mean(reconstruction_loss + kl_loss)
+        #self.model.add_loss(vae_loss)
+
         def loss_modificata(z_mean,z_log_var):
             def loss_autoencoder(true, pred):
                 # Reconstruction loss
                 reconstruction_loss = keras.losses.mean_squared_error(true,pred)
                 # KL divergence loss
-                #kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
-                #kl_loss = K.sum(kl_loss, axis=-1)
-                #kl_loss *= -0.5
+                kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
+                kl_loss = K.sum(kl_loss, axis=1)#axis? 1 o -1
+                kl_loss *= -0.5
                 #vae_loss = K.mean(reconstruction_loss + kl_loss)
                 return reconstruction_loss#vae_loss 
             return loss_autoencoder
         
         self.model.compile(loss={'clustering':'kld','decoder':loss_modificata(z_mean, z_log_var)},#vae_loss(z_mean, z_log_var)},#loss_autoencoder},
-                           loss_weights=[gamma, 1],
+                           loss_weights=[gamma,1],
                            optimizer=optimizer,
                            run_eagerly=True)
         
@@ -264,7 +270,7 @@ class IDEC(object):
         self.model.load_weights(weights_path)
 
     def extract_feature(self, x):  # extract features from before clustering layer
-        encoder = Model(self.model.input, self.model.get_layer('encoder_%d' % (self.n_stacks - 1)).output)
+        encoder = Model(self.model.input, self.model.get_layer('encoder').output)
         return encoder.predict(x)
 
     def predict_clusters(self, x):  # predict cluster labels using the output of clustering layer
@@ -277,21 +283,45 @@ class IDEC(object):
         return (weight.T / weight.sum(1)).T
 
     def clustering(self, x, y=None,
+                   epochs=25,
                    tol=1e-3,
                    update_interval=140,
                    maxiter=2e4,
-                   save_dir='./results/idec'):
+                   save_dir='./results/idec',
+                   cluster_method='kmeans'):
 
         print('Update interval', update_interval)
-        save_interval = x.shape[0] / self.batch_size * 5  # 5 epochs
+        save_interval = x.shape[0] / self.batch_size * epochs  # 5 epochs
         print('Save interval', save_interval)
 
         # initialize cluster centers using k-means
         print('Initializing cluster centers with k-means.')
-        kmeans = KMeans(n_clusters=self.n_clusters, n_init=20)
-        y_pred = kmeans.fit_predict(self.encoder.predict(x)[2])
-        y_pred_last = y_pred
-        self.model.get_layer(name='clustering').set_weights([kmeans.cluster_centers_])
+        features = self.encoder.predict(x)[2]
+        if cluster_method=='kmeans':
+            kmeans = KMeans(n_clusters=self.n_clusters, n_init=20)
+            y_pred = kmeans.fit_predict(features)
+            y_pred_last = y_pred
+            print(kmeans.cluster_centers_)
+            self.model.get_layer(name='clustering').set_weights([kmeans.cluster_centers_])
+        if cluster_method=='SC':
+            SC = SpectralClustering(n_clusters=self.n_clusters, n_init=20)
+            y_pred = SC.fit_predict(features)
+            y_pred_last = y_pred
+            
+            def compute_centroid(array):
+                n_dim = len(array[0])
+                length = array.shape[0]
+                centroid = []
+                for i in range(n_dim):
+                    sum_i = np.sum(array[:, i]) / length
+                    centroid = np.append(centroid, sum_i)
+                return centroid
+            centroids = []
+            for i in np.unique(y_pred):
+                idx = (y_pred == i)
+                centroids.append(list(compute_centroid(features[idx, :])))
+            self.model.get_layer(name='clustering').set_weights([np.array(centroids)])
+        
         # logging file
         import csv, os
         if not os.path.exists(save_dir):
@@ -307,6 +337,7 @@ class IDEC(object):
             if ite % update_interval == 0:
                 q, _ = self.model.predict(x, verbose=0)
                 p = self.target_distribution(q)  # update the auxiliary target distribution p
+
                 # evaluate the clustering performance
                 y_pred = q.argmax(1)
                 delta_label = np.sum(y_pred != y_pred_last).astype(np.float32) / y_pred.shape[0]
@@ -326,25 +357,26 @@ class IDEC(object):
                     print('Reached tolerance threshold. Stopping training.')
                     logfile.close()
                     break
+
             # train on batch
             if (index + 1) * self.batch_size > x.shape[0]:
                 loss = self.model.train_on_batch(x=x[index * self.batch_size::],
-                                                 y=[p[index * self.batch_size::], 
-                                                    x[index * self.batch_size::]])
+                                                 y=[p[index * self.batch_size::], x[index * self.batch_size::]])
                 index = 0
             else:
                 loss = self.model.train_on_batch(x=x[index * self.batch_size:(index + 1) * self.batch_size],
                                                  y=[p[index * self.batch_size:(index + 1) * self.batch_size],
                                                     x[index * self.batch_size:(index + 1) * self.batch_size]])
                 index += 1
+            print('loss: ',loss)
             # save intermediate model
-            #if ite % save_interval == 0:
+            if ite % save_interval == 0:
                 # save IDEC model checkpoints
-            print('saving model to:', save_dir + '/IDEC_model_' + str(ite) + '.h5')
-            self.model.save_weights(save_dir + '/IDEC_model_' + str(ite) + '.h5')
+                print('saving model to:', save_dir + '/IDEC_model_' + str(ite) + '.h5')
+                #self.model.save(save_dir + '/IDEC_model_' + str(ite) + '.h5')
+                self.model.save_weights(save_dir + '/IDEC_model_' + str(ite) + '.h5')
 
             ite += 1
-
         # save the trained model
         logfile.close()
         print('saving model to:', save_dir + '/IDEC_model_final.h5')
@@ -353,34 +385,44 @@ class IDEC(object):
         return y_pred
 
 #%%
-if __name__ == "__main__":
+if __name__ == "__main__": 
     # setting the hyper parameters     
     
     import argparse
 
     parser = argparse.ArgumentParser(description='train',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--dataset', default='mnist', choices=['mnist', 'usps', 'reutersidf10k'])
     parser.add_argument('--n_clusters', default=6, type=int)
     parser.add_argument('--batch_size', default=32, type=int)
     parser.add_argument('--maxiter', default=12e4, type=int)
-    parser.add_argument('--gamma', default=0.1, type=float,
+    parser.add_argument('--gamma', default=0, type=float,
                         help='coefficient of clustering loss')
-    parser.add_argument('--update_interval', default=100, type=int)
+    parser.add_argument('--update_interval', default=1, type=int)
+    parser.add_argument('--epochs',default=20,type=int)
     parser.add_argument('--tol', default=0.001, type=float)
-    parser.add_argument('--ae_weights', default='euromds_weights.hdf5', help='This argument must be given')
-    parser.add_argument('--save_dir', default='results/idec_var')
+    parser.add_argument('--ae_weights', default='out/dec_structure17/euromds_weights.hdf5', help='This argument must be given')
+    parser.add_argument('--save_dir', default='results/idec_var8')
+    parser.add_argument('--cluster_method',default='SC',choices=['kmeans','SC'])
     args = parser.parse_args()
     print(args)
 
-    # load dataset
-    optimizer = SGD(lr=0.1, momentum=0.99)
+    import os    
+    if not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir)
+    
     import json
+    with open(args.save_dir+'/config.json', 'w') as file:
+        json.dump(vars(args), file)
+        
+    # load dataset
+    optimizer = 'sgd'#SGD(lr=0.1, momentum=0.99)
     x = json.load(open('data/euromds/euromds.json','r'))
     x = np.array(x)
     #if exclude_data_duplicates == True:
         # exclude duplicate rows:
     x = np.unique(x,axis=0)
+
+
 
     # prepare the IDEC model
     idec = IDEC(dims=[x.shape[-1], 500, 500, 2000, 10], n_clusters=args.n_clusters, batch_size=args.batch_size)
@@ -390,8 +432,8 @@ if __name__ == "__main__":
 
     # begin clustering, time not include pretraining part.
     t0 = time()
-    y_pred = idec.clustering(x, y=None, tol=args.tol, maxiter=3,#args.maxiter,
-                                 update_interval=args.update_interval, save_dir=args.save_dir)
+    y_pred = idec.clustering(x, y=None, epochs=args.epochs, tol=args.tol, maxiter=args.maxiter,
+                                 update_interval=args.update_interval, save_dir=args.save_dir,cluster_method=args.cluster_method)
    # print('acc:', cluster_acc(y, y_pred))
     print('clustering time: ', (time() - t0))
     

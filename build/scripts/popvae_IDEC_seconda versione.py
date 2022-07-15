@@ -12,9 +12,86 @@ from tensorflow.keras import layers
 #from keras.layers.core import Lambda
 from tensorflow.keras import backend as K
 from tensorflow.keras.models import Model
-import tensorflow
+import tensorflow as tf
+
+
+from tensorflow.python.keras.layers import Layer, InputSpec
+
+from sklearn.cluster import KMeans,SpectralClustering
+
+
+
+
+class ClusteringLayer(Layer):
+    """
+    Clustering layer converts input sample (feature) to soft label, i.e. a vector that represents the probability of the
+    sample belonging to each cluster. The probability is calculated with student's t-distribution.
+
+    # Example
+    ```
+        model.add(ClusteringLayer(n_clusters=10))
+    ```
+    # Arguments
+        n_clusters: number of clusters.
+        weights: list of Numpy array with shape `(n_clusters, n_features)` witch represents the initial cluster centers.
+        alpha: parameter in Student's t-distribution. Default to 1.0.
+    # Input shape
+        2D tensor with shape: `(n_samples, n_features)`.
+    # Output shape
+        2D tensor with shape: `(n_samples, n_clusters)`.
+    """
+
+    def __init__(self, n_clusters, weights=None, alpha=1.0, **kwargs):
+        if 'input_shape' not in kwargs and 'input_dim' in kwargs:
+            kwargs['input_shape'] = (kwargs.pop('input_dim'),)
+        super(ClusteringLayer, self).__init__(**kwargs)
+        self.n_clusters = n_clusters
+        self.alpha = alpha
+        self.initial_weights = weights
+        self.input_spec = InputSpec(ndim=2)
+
+    def build(self, input_shape):
+        assert len(input_shape) == 2
+        input_dim = input_shape[1]
+        self.input_spec = InputSpec(dtype=K.floatx(), shape=(None, input_dim))
+        self.clusters = self.add_weight(shape=(self.n_clusters, input_dim), initializer='glorot_uniform', name='clusters')
+        if self.initial_weights is not None:
+            self.set_weights(self.initial_weights)
+            del self.initial_weights
+        self.built = True
+
+    def call(self, inputs, **kwargs):
+        """ student t-distribution, as same as used in t-SNE algorithm.
+                 q_ij = 1/(1+dist(x_i, u_j)^2), then normalize it.
+        Arguments:
+            inputs: the variable containing data, shape=(n_samples, n_features)
+        Return:
+            q: student's t-distribution, or soft labels for each sample. shape=(n_samples, n_clusters)
+        """
+        q = 1.0 / (1.0 + (K.sum(K.square(K.expand_dims(inputs, axis=1) - self.clusters), axis=2) / self.alpha))
+        q **= (self.alpha + 1.0) / 2.0
+        q = K.transpose(K.transpose(q) / K.sum(q, axis=1))
+        return q
+
+    def compute_output_shape(self, input_shape):
+        assert input_shape and len(input_shape) == 2
+        return input_shape[0], self.n_clusters
+
+    def get_config(self):
+        config = {'n_clusters': self.n_clusters}
+        base_config = super(ClusteringLayer, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+
+
+
+
+
 
 parser=argparse.ArgumentParser()
+parser.add_argument('--ae_weights', default='out/dec_structure17/euromds_weights.hdf5', help='This argument must be given')
+parser.add_argument('--gamma',default=1)
+parser.add_argument('--coeff_vae_loss',default=1)
 parser.add_argument("--loss",default='binary_crossentropy',choices=['binary_crossentropy','mse'])
 parser.add_argument("--opt",default='sgd',choices=['sgd','adam'])
 parser.add_argument("--exclude_data_duplicates",default=True)
@@ -25,7 +102,7 @@ parser.add_argument("--infile",default='data/euromds/euromds.json',
                           by scikit-allel's `vcf_to_zarr( )` function. `.popvae.hdf5`\
                           files store filtered genotypes from previous runs (i.e. \
                           from --save_allele_counts).")
-parser.add_argument("--out",default="out/dec_structure22",
+parser.add_argument("--out",default="out/idec15",
                     help="path for saving output")
 parser.add_argument("--patience",default=50,type=int,
                     help="training patience. default=50")
@@ -127,6 +204,13 @@ width_range=args.width_range
 width_range=np.array([int(x) for x in re.split(",",width_range)])
 
 
+gamma = args.gamma
+ae_weights = args.ae_weights
+coeff_vae_loss = args.coeff_vae_loss
+
+if not os.path.exists(args.out):
+    os.makedirs(args.out)
+
 import json
 with open(out+'/config.json', 'w') as file:
     json.dump(vars(args), file)
@@ -138,7 +222,7 @@ if not seed==None:
     os.environ['PYTHONHASHSEED']=str(seed)
     random.seed(seed)
     np.random.seed(seed)
-    tensorflow.set_random_seed(seed)
+    tf.set_random_seed(seed)
 
 ### load euromds dataset
 import json
@@ -189,6 +273,7 @@ decoder=Model(decoder_input,output,name='decoder')
 
 #end-to-end vae
 output_seq = decoder(encoder(input_seq)[2])
+
 vae = Model(input_seq, output_seq, name='vae')
 
 #get loss as xent_loss+kl_loss
@@ -206,7 +291,47 @@ kl_loss *= -0.5
 vae_loss = K.mean(reconstruction_loss + kl_loss)
 vae.add_loss(vae_loss)
 
-vae.compile(optimizer=opt)#'adam'
+vae.load_weights(ae_weights)
+
+
+
+#clusterong layer
+n_clusters = 6
+clustering_layer = ClusteringLayer(n_clusters, name='clustering')(z)
+
+idec = Model(vae.input, [clustering_layer,vae.output], name='idec')
+
+
+def target_distribution(q): 
+    weight = q ** 2 / K.sum(q,0)
+    return tf.transpose(tf.transpose(weight) / K.sum(weight,1))
+#q, _ = idec.predict(dc, verbose=0) #PROBLEMA forse questo calcolo non viene aggiornato??
+p = target_distribution(idec.output[0])
+clustering_loss = keras.losses.kl_divergence(p,clustering_layer)
+
+#total_loss = coeff_vae_loss*vae_loss + gamma*clustering_loss
+total_loss = K.mean(coeff_vae_loss*vae_loss+gamma*clustering_loss)
+#idec.add_loss(coeff_vae_loss*vae_loss)
+#idec.add_loss(gamma*clustering_loss)
+idec.add_loss(total_loss)
+
+#initialization
+features = encoder.predict(dc)[2]
+kmeans = KMeans(n_clusters=n_clusters, n_init=20)
+y_pred = kmeans.fit_predict(features)
+idec.get_layer(name='clustering').set_weights([kmeans.cluster_centers_])
+
+
+
+idec.compile(#loss={'clustering':clustering_loss,'decoder':vae_loss},
+             #loss_weights=[gamma,1],
+             optimizer=opt)#'adam'
+
+
+
+
+####################################################################
+ 
 
 #callbacks
 checkpointer=keras.callbacks.ModelCheckpoint(
@@ -249,9 +374,10 @@ print_predictions=keras.callbacks.LambdaCallback(
                         epoch=epoch,
                         frequency=prediction_freq))
 
+
 #training
 t1=time.time()
-history=vae.fit(x=traingen,
+history=idec.fit(x=traingen,
                 y=None,
                 shuffle=True,
                 epochs=max_epochs,
@@ -268,7 +394,7 @@ h=pd.DataFrame(history.history)
 h.to_csv(out+"/euromds_history.txt",sep="\t")
 
 #predict latent space coords for all samples from weights minimizing val loss
-vae.load_weights(out+"/euromds_weights.hdf5")
+idec.load_weights(out+"/euromds_weights.hdf5")
 pred=encoder.predict(dc,batch_size=batch_size) #returns [mean,sd,sample] for individual distributions in latent space
 p=pd.DataFrame()
 p['mean1']=pred[0][:,0]
@@ -317,36 +443,15 @@ if PCA:
 if plot:
     subprocess.run("python scripts/plotvae.py --latent_coords "+out+'/euromds_latent_coords.txt'+' --metadata '+metadata,shell=True)
 
-# ###debugging parameters
-# os.chdir("/Users/cj/popvae/")
-# infile="data/pabu/pabu_test_genotypes.vcf"
-# sample_data="data/pabu/pabu_test_sample_data.txt"
-# save_allele_counts=True
-# patience=100
-# batch_size=32
-# max_epochs=300
-# seed=12345
-# save_weights=False
-# train_prop=0.9
-# gpu_number='0'
-# prediction_freq=2
-# out="out/test"
-# latent_dim=2
-# max_SNPs=10000
-# PCA=True
-# depth=6
-# width=128
-# parallel=False
-# prune_iter=1
-# prune_size=500
-# PCA_scaler="Patterson"
 
 
 
-'''
-\euromds_weights.hdf5
-WARNING:tensorflow:Found duplicated `Variable`s in Model's `weights`. 
-This is usually caused by `Variable`s being shared by Layers in the Model. 
-These `Variable`s will be treated as separate `Variable`s when the Model 
-is restored. To avoid this, please save with `save_format="tf"`.
-'''
+
+
+
+#%%
+
+
+
+
+
