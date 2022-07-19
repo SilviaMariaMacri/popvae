@@ -6,20 +6,16 @@ import allel
 import pandas as pd
 import time
 import random
-import zarr, subprocess, h5py, re, sys, argparse
+import subprocess, re, argparse
 from matplotlib import pyplot as plt
 from tensorflow.keras import layers
 #from keras.layers.core import Lambda
 from tensorflow.keras import backend as K
 from tensorflow.keras.models import Model
 import tensorflow as tf
-
-
-from tensorflow.python.keras.layers import Layer, InputSpec
+from tensorflow.keras.layers import Layer,InputSpec,Dense,Input
 
 from sklearn.cluster import KMeans,SpectralClustering
-
-
 
 
 class ClusteringLayer(Layer):
@@ -83,14 +79,25 @@ class ClusteringLayer(Layer):
         return dict(list(base_config.items()) + list(config.items()))
 
 
+def load_mnist():
+    # the data, shuffled and split between train and test sets
+    from tensorflow.keras.datasets import mnist
+    (x_train, y_train), (x_test, y_test) = mnist.load_data()
+    x = np.concatenate((x_train, x_test))
+    y = np.concatenate((y_train, y_test))
+    x = x.reshape((x.shape[0], -1))
+    x = np.divide(x, 255.)
+    print('MNIST samples', x.shape)
+    return x, y
 
 
 
 
 
 parser=argparse.ArgumentParser()
+parser.add_argument('--n_clusters',default=10)
 parser.add_argument('--dataset',default='mnist',choices=['mnist','eurodms'])
-parser.add_argument('--ae_weights_dir', default='out/mnist', help='This argument must be given')
+parser.add_argument('--ae_weights_dir', default='results/server/mnist1', help='This argument must be given')
 parser.add_argument('--gamma',default=0.1)
 parser.add_argument('--coeff_vae_loss',default=1)
 parser.add_argument("--loss",default='binary_crossentropy',choices=['binary_crossentropy','mse'])
@@ -103,7 +110,7 @@ parser.add_argument("--infile",default='data/euromds/euromds.json',
                           by scikit-allel's `vcf_to_zarr( )` function. `.popvae.hdf5`\
                           files store filtered genotypes from previous runs (i.e. \
                           from --save_allele_counts).")
-parser.add_argument("--out",default="out/mnist_idec",
+parser.add_argument("--out",default="prova",
                     help="path for saving output")
 parser.add_argument("--patience",default=50,type=int,
                     help="training patience. default=50")
@@ -205,9 +212,9 @@ depth_range=np.array([int(x) for x in re.split(",",depth_range)])
 width_range=args.width_range
 width_range=np.array([int(x) for x in re.split(",",width_range)])
 dataset=args.dataset
-
+n_clusters = args.n_clusters
 gamma = args.gamma
-ae_weights = args.ae_weights
+#ae_weights = args.ae_weights
 coeff_vae_loss = args.coeff_vae_loss
 
 if not os.path.exists(args.out):
@@ -228,7 +235,6 @@ if not seed==None:
 
 
 if dataset=='mnist':
-    from datasets import load_mnist
     dc, samples = load_mnist()
 
 if dataset == 'euromds':    
@@ -251,6 +257,16 @@ testgen=dc[test,:]
 traingen = dc.copy()
 testgen = dc.copy()
 
+class Sampling(layers.Layer):
+    """Uses (z_mean, z_log_var) to sample z, the vector encoding a digit."""
+
+    def call(self, inputs):
+        z_mean, z_log_var = inputs
+        batch = tf.shape(z_mean)[0]
+        dim = tf.shape(z_mean)[1]
+        epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
+        return z_mean + tf.exp(0.5 * z_log_var) * epsilon
+
 
 #load model
 def sampling(args):
@@ -259,15 +275,20 @@ def sampling(args):
                               mean=0., stddev=stddev_epsilon,seed=seed)
     return z_mean + K.exp(z_log_var) * epsilon
 
+
+
 #encoder
 input_seq = keras.Input(shape=(traingen.shape[1],))
 x=layers.Dense(500,activation="relu")(input_seq)
 x=layers.Dense(500,activation="relu")(x)
 x=layers.Dense(2000,activation="relu")(x)
+
 z_mean=layers.Dense(latent_dim)(x)
 z_log_var=layers.Dense(latent_dim)(x)
-z = layers.Lambda(sampling,output_shape=(latent_dim,), name='z')([z_mean, z_log_var])
-encoder=Model(input_seq,[z_mean,z_log_var,z],name='encoder')
+#z = Sampling()([z_mean, z_log_var])#
+z=layers.Lambda(sampling,output_shape=(latent_dim,), name='z')([z_mean, z_log_var])
+
+encoder=Model(input_seq,[z_mean,z_log_var,z],name='encoder')#,z
 
 #decoder
 decoder_input=layers.Input(shape=(latent_dim,),name='z_sampling')
@@ -300,10 +321,9 @@ vae.add_loss(vae_loss)
 vae.load_weights(ae_weights_dir+'/euromds_weights.hdf5')
 
 
-
 #clusterong layer
-n_clusters = 6
-clustering_layer = ClusteringLayer(n_clusters, name='clustering')(z)
+
+clustering_layer = ClusteringLayer(n_clusters, name='clustering')(encoder.output[0])#[2])
 
 idec = Model(vae.input, [clustering_layer,vae.output], name='idec')
 
@@ -335,8 +355,8 @@ idec.compile(#loss={'clustering':clustering_loss,'decoder':vae_loss},
 
 
 
-#%%
-####################################################################
+
+#################################################################### Lambda
  
 
 #callbacks
@@ -455,7 +475,7 @@ if plot:
 
 
 
-#%%
+
 
 
 

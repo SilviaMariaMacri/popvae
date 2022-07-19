@@ -6,13 +6,25 @@ import allel
 import pandas as pd
 import time
 import random
-import zarr, subprocess, h5py, re, sys, argparse
+import subprocess, re, argparse
 from matplotlib import pyplot as plt
 from tensorflow.keras import layers
 #from keras.layers.core import Lambda
 from tensorflow.keras import backend as K
 from tensorflow.keras.models import Model
 import tensorflow
+
+
+def load_mnist():
+    # the data, shuffled and split between train and test sets
+    from tensorflow.keras.datasets import mnist
+    (x_train, y_train), (x_test, y_test) = mnist.load_data()
+    x = np.concatenate((x_train, x_test))
+    y = np.concatenate((y_train, y_test))
+    x = x.reshape((x.shape[0], -1))
+    x = np.divide(x, 255.)
+    print('MNIST samples', x.shape)
+    return x, y
 
 parser=argparse.ArgumentParser() 
 parser.add_argument('--dataset',default='mnist',choices=['euromds','mnist'])
@@ -128,6 +140,9 @@ depth_range=np.array([int(x) for x in re.split(",",depth_range)])
 width_range=args.width_range
 width_range=np.array([int(x) for x in re.split(",",width_range)])
 
+
+if not os.path.exists(args.out):
+    os.makedirs(args.out)
 
 import json
 with open(out+'/config.json', 'w') as file:
