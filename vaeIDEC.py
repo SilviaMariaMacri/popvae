@@ -84,9 +84,9 @@ def load_data(dataset):
     
     if dataset=='mnist':
         from tensorflow.keras.datasets import mnist
-        (x_train, y_train), (x_test, y_test) = mnist.load_data()
-        x = np.concatenate((x_train, x_test))
-        y = np.concatenate((y_train, y_test))
+        (x, y), (x_test, y_test) = mnist.load_data()
+        #x = np.concatenate((x_train, x_test))
+        #y = np.concatenate((y_train, y_test))
         x = x.reshape((x.shape[0], -1))
         x = np.divide(x, 255.)
         print('MNIST samples', x.shape)
@@ -186,7 +186,7 @@ class IDEC_PopVAE(object):
         def target_distribution(q):
             weight = q ** 2 / K.sum(q,0)
             return tf.transpose(tf.transpose(weight) / K.sum(weight,1))
-              
+
         q, _ = self.idec.output
         p = target_distribution(q)
         clustering_loss = keras.losses.kl_divergence(p,clustering_layer)
@@ -277,15 +277,12 @@ class IDEC_PopVAE(object):
         model.load_weights(out+"/"+phase+"_weights.hdf5")
         pred=model.get_layer('encoder')(x) #returns [mean,sd,sample] for individual distributions in latent space
         p=pd.DataFrame()
-        p['mean1']=pred[0][:,0]
-        p['mean2']=pred[0][:,1]
-        p['sd1']=pred[1][:,0]
-        p['sd2']=pred[1][:,1]
-        pred=p
-        #pred.columns=['LD'+str(x+1) for x in range(len(pred.columns))]
+        for i in range(len(pred[0])):
+            p['mean'+str(i)] = pred[0][:,i]
+            p['sd'+str(i)] = pred[1][:,i]
         if y is not None:
-            pred['sampleID']=y
-        pred.to_csv(out+'/'+phase+'_latent_coords.txt',sep='\t',index=False)
+            p['sampleID']=y
+        p.to_csv(out+'/'+phase+'_latent_coords.txt',sep='\t',index=False)
         
         ######### plots #########
         #training history
@@ -325,15 +322,15 @@ if __name__ == "__main__":
     parser.add_argument("--out",default="prova",help="path for saving output")
     parser.add_argument('--dataset',default='mnist',choices=['mnist','eurodms'])
     parser.add_argument('--n_clusters',default=10)
-    parser.add_argument('--ae_weights',default=None,choices=[None,'ae_weights.hdf5'],help="if None pretraining phase is run")
+    parser.add_argument('--ae_weights',default=None,help="if None pretraining phase is run")
     parser.add_argument('--ae_weights_dir',default=None,help='ae_weights directory if pretraining not necessary')
-    parser.add_argument('--coeff_vae_loss',default=0)
-    parser.add_argument('--gamma',default=1)
+    parser.add_argument('--coeff_vae_loss',default=1)
+    parser.add_argument('--gamma',default=0)
     parser.add_argument("--loss",default='binary_crossentropy',choices=['binary_crossentropy','mse'])
     parser.add_argument("--opt",default='adam',choices=['sgd','adam'])
     parser.add_argument("--stddev_epsilon",default=0.5,help="std per epsilon nella funzione sampling")
     parser.add_argument("--latent_dim",default=10,type=int,help="N latent dimensions to fit. default: 2")
-    parser.add_argument("--max_epochs",default=1,type=int,help="max training epochs. default=500")
+    parser.add_argument("--max_epochs",default=1000,type=int,help="max training epochs. default=500")
     parser.add_argument("--patience",default=50,type=int,help="training patience. default=50")
     parser.add_argument("--batch_size",default=256,type=int,help="batch size. default=32")
     parser.add_argument("--seed",default=None,type=int,help="random seed. \default: None")
@@ -348,8 +345,8 @@ if __name__ == "__main__":
     ae_weights_dir = args.ae_weights_dir
     if args.ae_weights_dir is None:
         ae_weights_dir = out
-    coeff_vae_loss = args.coeff_vae_loss
-    gamma = args.gamma
+    coeff_vae_loss = float(args.coeff_vae_loss)
+    gamma = float(args.gamma)
     loss = args.loss
     optimizer = args.opt
     stddev_epsilon = args.stddev_epsilon    
@@ -376,8 +373,6 @@ if __name__ == "__main__":
     
     # load dataset
     x,y=load_data(dataset)
-    x=x[:10]
-    y=y[:10]
     real_dim = x.shape[1]
     
     model = IDEC_PopVAE(latent_dim,stddev_epsilon,seed,real_dim,n_clusters,out)
