@@ -125,7 +125,7 @@ class IDEC_PopVAE(object):
         self.n_clusters = n_clusters
         self.out = out
     
-    def vae(self,loss):
+    def vae_function(self,loss):
     
         def sampling(args):
             z_mean ,z_log_var = args
@@ -176,7 +176,7 @@ class IDEC_PopVAE(object):
         
 
       
-    def idec(self,coeff_vae_loss,gamma):
+    def idec_function(self,coeff_vae_loss,gamma):
         
         #self.vae.load_weights(out+'/ae_weights.hdf5')
         
@@ -328,7 +328,7 @@ if __name__ == "__main__":
 
     
     parser=argparse.ArgumentParser()
-    parser.add_argument("--out",default="prova1",help="path for saving output")
+    parser.add_argument("--out",default="prova_correzione_nome_2",help="path for saving output")
     parser.add_argument('--dataset',default='mnist',choices=['mnist','eurodms'])
     parser.add_argument('--n_clusters',default=10)
     parser.add_argument('--ae_weights',default='ae_weights.hdf5',help="if None pretraining phase is run")
@@ -385,7 +385,7 @@ if __name__ == "__main__":
     real_dim = x.shape[1]
     
     model = IDEC_PopVAE(latent_dim,stddev_epsilon,seed,real_dim,n_clusters,out)
-    model.vae(loss)
+    model.vae_function(loss)
    
     if args.ae_weights is None:
         print('pretraining')
@@ -395,8 +395,8 @@ if __name__ == "__main__":
         
     print('clustering')
     model.load_weights(ae_weights_dir+'/'+ae_weights,'ae')
-    model.idec(coeff_vae_loss,gamma) 
-    #%%
+    model.idec_function(coeff_vae_loss,gamma) 
+    
     phase = 'idec'
     model.training(x,y,phase,optimizer,patience,batch_size,prediction_freq,max_epochs)
    
