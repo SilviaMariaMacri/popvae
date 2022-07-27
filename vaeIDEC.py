@@ -182,20 +182,27 @@ class IDEC_PopVAE(object):
         
         clustering_layer = ClusteringLayer(self.n_clusters, name='clustering')(self.encoder.output[0])#[2])
         self.idec = Model(self.vae.input, [clustering_layer,self.vae.output], name='idec')
-    
+        
         def target_distribution(q):
             weight = q ** 2 / K.sum(q,0)
             return tf.transpose(tf.transpose(weight) / K.sum(weight,1))
 
         q, _ = self.idec.output
         p = target_distribution(q)
-        clustering_loss = keras.losses.kl_divergence(p,clustering_layer)
+        clustering_loss = keras.losses.kl_divergence(p,q)
         total_loss = coeff_vae_loss*self.vae_loss + gamma*clustering_loss
-        #total_loss = K.mean(coeff_vae_loss*self.vae_loss+gamma*clustering_loss)
-        #idec.add_loss(coeff_vae_loss*vae_loss)
-        #idec.add_loss(gamma*clustering_loss)
-        self.idec.add_loss(total_loss)        
+        self.idec.add_loss(total_loss) 
+        '''
         
+        loss = y_true * log(y_true / y_pred)
+        
+        
+          y_pred = tf.convert_to_tensor(y_pred)
+          y_true = tf.cast(y_true, y_pred.dtype)
+          y_true = backend.clip(y_true, backend.epsilon(), 1)
+          y_pred = backend.clip(y_pred, backend.epsilon(), 1)
+          return tf.reduce_sum(y_true * tf.math.log(y_true / y_pred), axis=-1)
+        '''
         #return self.idec
     
     def training(self,x,y,phase,optimizer,patience,batch_size,prediction_freq,max_epochs):
@@ -277,9 +284,9 @@ class IDEC_PopVAE(object):
         model.load_weights(out+"/"+phase+"_weights.hdf5")
         pred=model.get_layer('encoder')(x) #returns [mean,sd,sample] for individual distributions in latent space
         p=pd.DataFrame()
-        for i in range(len(pred[0])):
-            p['mean'+str(i)] = pred[0][:,i]
-            p['sd'+str(i)] = pred[1][:,i]
+        for i in range(len(pred[0][0])):
+            p['mean'+str(i)] = pred[0][:,i].numpy()
+            p['sd'+str(i)] = pred[1][:,i].numpy()
         if y is not None:
             p['sampleID']=y
         p.to_csv(out+'/'+phase+'_latent_coords.txt',sep='\t',index=False)
@@ -312,6 +319,8 @@ class IDEC_PopVAE(object):
 
     def predict_clusters(self, x):  # predict cluster labels using the output of clustering layer
         q, _ = self.idec.predict(x, verbose=0)
+        #q,_ = self.idec(x)
+        q = q.numpy()
         return q.argmax(1)
         
 
@@ -319,13 +328,13 @@ if __name__ == "__main__":
 
     
     parser=argparse.ArgumentParser()
-    parser.add_argument("--out",default="prova",help="path for saving output")
+    parser.add_argument("--out",default="prova1",help="path for saving output")
     parser.add_argument('--dataset',default='mnist',choices=['mnist','eurodms'])
     parser.add_argument('--n_clusters',default=10)
-    parser.add_argument('--ae_weights',default=None,help="if None pretraining phase is run")
-    parser.add_argument('--ae_weights_dir',default=None,help='ae_weights directory if pretraining not necessary')
-    parser.add_argument('--coeff_vae_loss',default=1)
-    parser.add_argument('--gamma',default=0)
+    parser.add_argument('--ae_weights',default='ae_weights.hdf5',help="if None pretraining phase is run")
+    parser.add_argument('--ae_weights_dir',default='out/mnist/pretraining/mnist0',help='ae_weights directory if pretraining not necessary')
+    parser.add_argument('--coeff_vae_loss',default=0)
+    parser.add_argument('--gamma',default=1)
     parser.add_argument("--loss",default='binary_crossentropy',choices=['binary_crossentropy','mse'])
     parser.add_argument("--opt",default='adam',choices=['sgd','adam'])
     parser.add_argument("--stddev_epsilon",default=0.5,help="std per epsilon nella funzione sampling")
@@ -377,7 +386,7 @@ if __name__ == "__main__":
     
     model = IDEC_PopVAE(latent_dim,stddev_epsilon,seed,real_dim,n_clusters,out)
     model.vae(loss)
-    
+   
     if args.ae_weights is None:
         print('pretraining')
         phase='ae'
@@ -387,6 +396,7 @@ if __name__ == "__main__":
     print('clustering')
     model.load_weights(ae_weights_dir+'/'+ae_weights,'ae')
     model.idec(coeff_vae_loss,gamma) 
+    #%%
     phase = 'idec'
     model.training(x,y,phase,optimizer,patience,batch_size,prediction_freq,max_epochs)
    

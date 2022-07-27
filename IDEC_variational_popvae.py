@@ -384,7 +384,7 @@ class IDEC(object):
         
         return y_pred
 
-#%%
+
 if __name__ == "__main__": 
     # setting the hyper parameters     
     
@@ -400,9 +400,9 @@ if __name__ == "__main__":
     parser.add_argument('--update_interval', default=1, type=int)
     parser.add_argument('--epochs',default=20,type=int)
     parser.add_argument('--tol', default=0.001, type=float)
-    parser.add_argument('--ae_weights', default='out/dec_structure17/euromds_weights.hdf5', help='This argument must be given')
-    parser.add_argument('--save_dir', default='results/idec_var8')
-    parser.add_argument('--cluster_method',default='SC',choices=['kmeans','SC'])
+    parser.add_argument('--ae_weights', default='out/euromds/pretraining/dec_structure/dec_structure17/euromds_weights.hdf5', help='This argument must be given')
+    parser.add_argument('--save_dir', default='prova')
+    parser.add_argument('--cluster_method',default='kmeans',choices=['kmeans','SC'])
     args = parser.parse_args()
     print(args)
 
@@ -429,7 +429,7 @@ if __name__ == "__main__":
     idec.initialize_model(ae_weights=args.ae_weights, gamma=args.gamma, optimizer=optimizer)
     #plot_model(idec.model, to_file='idec_model.png', show_shapes=True)
     idec.model.summary()
-
+#%%
     # begin clustering, time not include pretraining part.
     t0 = time()
     y_pred = idec.clustering(x, y=None, epochs=args.epochs, tol=args.tol, maxiter=args.maxiter,
